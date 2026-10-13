@@ -1,0 +1,293 @@
+<!DOCTYPE html>
+<html lang="nl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CMP 3D-viewer</title>
+<style>
+  :root {
+    --bg: #eef1f0;
+    --panel: #ffffff;
+    --ink: #1d2b2a;
+    --muted: #5d6b69;
+    --line: #cfd8d6;
+    --accent: #1f7a5c;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #1a2221;
+      --panel: #242f2e;
+      --ink: #e6efed;
+      --muted: #9fb0ad;
+      --line: #3a4846;
+      --accent: #4fc79c;
+    }
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    background: var(--bg);
+    color: var(--ink);
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    font-size: 14px;
+    display: flex;
+  }
+  #view { flex: 1; position: relative; min-width: 0; }
+  canvas { display: block; width: 100%; height: 100%; }
+  #status {
+    position: absolute; left: 12px; bottom: 12px;
+    background: var(--panel); border: 1px solid var(--line);
+    padding: 6px 10px; border-radius: 6px; color: var(--muted);
+  }
+  #status.error { color: #b3261e; border-color: #b3261e; }
+  #side {
+    width: 280px; max-width: 40%;
+    background: var(--panel);
+    border-left: 1px solid var(--line);
+    padding: 14px;
+    overflow-y: auto;
+  }
+  #side h2 { font-size: 15px; margin: 0 0 4px; }
+  #side p.hint { color: var(--muted); margin: 0 0 12px; line-height: 1.4; }
+  dl { margin: 0; }
+  dt { color: var(--muted); font-size: 12px; margin-top: 10px; }
+  dd { margin: 2px 0 0; word-break: break-word; }
+  .pset { margin-top: 14px; border-top: 1px solid var(--line); padding-top: 8px; }
+  .pset strong { display: block; margin-bottom: 4px; }
+  .pset div { display: flex; justify-content: space-between; gap: 8px; padding: 2px 0; }
+  .pset span:first-child { color: var(--muted); }
+  button {
+    margin-top: 14px; font: inherit; padding: 6px 12px;
+    border: 1px solid var(--line); border-radius: 6px;
+    background: transparent; color: var(--ink); cursor: pointer;
+  }
+  button:hover { border-color: var(--accent); }
+  button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  @media (max-width: 600px) {
+    body { flex-direction: column; }
+    #side { width: 100%; max-width: none; border-left: 0; border-top: 1px solid var(--line); max-height: 40%; }
+  }
+</style>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+  }
+}
+</script>
+</head>
+<body>
+  <div id="view">
+    <div id="status">Model laden…</div>
+  </div>
+  <aside id="side">
+    <h2>Elementinformatie</h2>
+    <p class="hint">Klik op een onderdeel van het model om de eigenschappen te zien. Slepen draait het model, scrollen zoomt.</p>
+    <div id="info"></div>
+  </aside>
+
+<script type="module">
+import * as THREE from "three";
+import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+import * as WebIFC from "https://cdn.jsdelivr.net/npm/web-ifc@0.0.57/web-ifc-api.js";
+
+// ====== INSTELLINGEN ======
+const IFC_FILE = "model.ifc"; // naam van je IFC-bestand in dezelfde map
+const WASM_PATH = "https://cdn.jsdelivr.net/npm/web-ifc@0.0.57/";
+// ==========================
+
+const view = document.getElementById("view");
+const statusEl = document.getElementById("status");
+const info = document.getElementById("info");
+
+// --- three.js basis ---
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(50, 1, 0.1, 5000);
+const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+view.appendChild(renderer.domElement);
+
+scene.add(new THREE.HemisphereLight(0xffffff, 0x8899aa, 1.1));
+const sun = new THREE.DirectionalLight(0xffffff, 1.4);
+sun.position.set(50, 100, 60);
+scene.add(sun);
+
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+
+const modelGroup = new THREE.Group();
+scene.add(modelGroup);
+
+function resize() {
+  const w = view.clientWidth, h = view.clientHeight;
+  renderer.setSize(w, h);
+  camera.aspect = w / h;
+  camera.updateProjectionMatrix();
+}
+window.addEventListener("resize", resize);
+resize();
+
+(function loop() {
+  requestAnimationFrame(loop);
+  controls.update();
+  renderer.render(scene, camera);
+})();
+
+function setStatus(text, isError = false) {
+  statusEl.textContent = text;
+  statusEl.classList.toggle("error", isError);
+  statusEl.style.display = text ? "block" : "none";
+}
+
+// --- IFC laden ---
+const ifcApi = new WebIFC.IfcAPI();
+let modelID = null;
+
+async function loadModel() {
+  try {
+    ifcApi.SetWasmPath(WASM_PATH);
+    await ifcApi.Init();
+
+    const res = await fetch(IFC_FILE);
+    if (!res.ok) throw new Error(`Bestand "${IFC_FILE}" niet gevonden (${res.status})`);
+    const data = new Uint8Array(await res.arrayBuffer());
+
+    setStatus("Model verwerken…");
+    modelID = ifcApi.OpenModel(data);
+
+    ifcApi.StreamAllMeshes(modelID, (mesh) => {
+      const placed = mesh.geometries;
+      for (let i = 0; i < placed.size(); i++) {
+        const pg = placed.get(i);
+        const geom = ifcApi.GetGeometry(modelID, pg.geometryExpressID);
+        const verts = ifcApi.GetVertexArray(geom.GetVertexData(), geom.GetVertexDataSize());
+        const idx = ifcApi.GetIndexArray(geom.GetIndexData(), geom.GetIndexDataSize());
+
+        const bg = new THREE.BufferGeometry();
+        const buf = new THREE.InterleavedBuffer(verts, 6);
+        bg.setAttribute("position", new THREE.InterleavedBufferAttribute(buf, 3, 0));
+        bg.setAttribute("normal", new THREE.InterleavedBufferAttribute(buf, 3, 3));
+        bg.setIndex(new THREE.BufferAttribute(idx, 1));
+
+        const c = pg.color;
+        const mat = new THREE.MeshStandardMaterial({
+          color: new THREE.Color(c.x, c.y, c.z),
+          opacity: c.w,
+          transparent: c.w < 1,
+          side: THREE.DoubleSide
+        });
+
+        const m = new THREE.Mesh(bg, mat);
+        m.matrix.fromArray(pg.flatTransformation);
+        m.matrixAutoUpdate = false;
+        m.userData.expressID = mesh.expressID;
+        m.userData.baseMaterial = mat;
+        modelGroup.add(m);
+        geom.delete();
+      }
+    });
+
+    fitCamera();
+    setStatus("");
+  } catch (err) {
+    console.error(err);
+    setStatus("Model laden mislukt: " + err.message, true);
+  }
+}
+
+function fitCamera() {
+  const box = new THREE.Box3().setFromObject(modelGroup);
+  if (box.isEmpty()) return;
+  const size = box.getSize(new THREE.Vector3());
+  const center = box.getCenter(new THREE.Vector3());
+  const dist = Math.max(size.x, size.y, size.z) * 1.6;
+  camera.position.set(center.x + dist, center.y + dist * 0.7, center.z + dist);
+  camera.near = dist / 100;
+  camera.far = dist * 20;
+  camera.updateProjectionMatrix();
+  controls.target.copy(center);
+  controls.update();
+}
+
+// --- selecteren en eigenschappen tonen ---
+const highlight = new THREE.MeshStandardMaterial({
+  color: 0x1f7a5c, emissive: 0x1f7a5c, emissiveIntensity: 0.5, side: THREE.DoubleSide
+});
+const raycaster = new THREE.Raycaster();
+const pointer = new THREE.Vector2();
+let selected = [];
+
+function clearSelection() {
+  selected.forEach((m) => (m.material = m.userData.baseMaterial));
+  selected = [];
+  info.innerHTML = "";
+}
+
+function val(x) {
+  if (x === null || x === undefined) return "-";
+  if (typeof x === "object" && "value" in x) return String(x.value);
+  return String(x);
+}
+
+function esc(s) {
+  return String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+
+async function showInfo(expressID) {
+  let name = "-", type = "-", guid = "-", objType = "-";
+  try {
+    const line = ifcApi.GetLine(modelID, expressID);
+    name = val(line.Name);
+    guid = val(line.GlobalId);
+    objType = val(line.ObjectType);
+    type = ifcApi.GetNameFromTypeCode(line.type);
+  } catch (e) { console.warn(e); }
+
+  let html = `<dl>
+    <dt>Naam</dt><dd>${esc(name)}</dd>
+    <dt>Type</dt><dd>${esc(type)}</dd>
+    <dt>Objecttype</dt><dd>${esc(objType)}</dd>
+    <dt>GlobalId</dt><dd>${esc(guid)}</dd>
+  </dl>`;
+
+  try {
+    const psets = await ifcApi.properties.getPropertySets(modelID, expressID, true);
+    for (const ps of psets) {
+      const rows = (ps.HasProperties || [])
+        .map((p) => `<div><span>${esc(val(p.Name))}</span><span>${esc(val(p.NominalValue))}</span></div>`)
+        .join("");
+      if (rows) html += `<div class="pset"><strong>${esc(val(ps.Name))}</strong>${rows}</div>`;
+    }
+  } catch (e) { /* property sets zijn optioneel */ }
+
+  html += `<button id="clear" type="button">Selectie wissen</button>`;
+  info.innerHTML = html;
+  document.getElementById("clear").addEventListener("click", clearSelection);
+}
+
+let downPos = null;
+renderer.domElement.addEventListener("pointerdown", (e) => { downPos = [e.clientX, e.clientY]; });
+renderer.domElement.addEventListener("pointerup", (e) => {
+  // alleen klikken, geen slepen
+  if (!downPos || Math.hypot(e.clientX - downPos[0], e.clientY - downPos[1]) > 4) return;
+  const r = renderer.domElement.getBoundingClientRect();
+  pointer.set(((e.clientX - r.left) / r.width) * 2 - 1, -((e.clientY - r.top) / r.height) * 2 + 1);
+  raycaster.setFromCamera(pointer, camera);
+  const hit = raycaster.intersectObjects(modelGroup.children, false)[0];
+
+  selected.forEach((m) => (m.material = m.userData.baseMaterial));
+  selected = [];
+  if (!hit) { info.innerHTML = ""; return; }
+
+  const id = hit.object.userData.expressID;
+  selected = modelGroup.children.filter((m) => m.userData.expressID === id);
+  selected.forEach((m) => (m.material = highlight));
+  showInfo(id);
+});
+
+loadModel();
+</script>
+</body>
+</html>
